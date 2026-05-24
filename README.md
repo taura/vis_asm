@@ -20,7 +20,7 @@ vis-asm examples/rs/template.s gcd1
 
 ## Requirements
 
-- Python ≥ 3.8
+- Python >= 3.8
 - [Graphviz](https://graphviz.org/) — the `dot` binary must be on `PATH`
 - *(optional)* `ipython`, for inline rendering inside a Jupyter notebook
 
