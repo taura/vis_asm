@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vis-asm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Visualize the control-flow graph of a function in assembly produced by Go, Julia, OCaml, or Rust compilers."
 readme = "README.md"
 requires-python = ">=3.8"
