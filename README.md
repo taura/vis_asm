@@ -6,6 +6,18 @@ produced by the Go, Julia, OCaml, or Rust compiler.
 Given the function name as it appears in the source code, `vis_asm` writes a
 DOT file and renders an SVG of the CFG.
 
+## Example
+
+CFG of the `gcd1` function as compiled by `rustc`:
+
+![CFG of gcd1](examples/rs/template_gcd1.svg)
+
+Reproduce with:
+
+```bash
+vis-asm examples/rs/template.s gcd1
+```
+
 ## Requirements
 
 - Python ≥ 3.8
