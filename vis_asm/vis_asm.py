@@ -35,8 +35,9 @@ _RET_RE = re.compile(r'^\s*(retq|ret)\b', re.IGNORECASE)
 _GO_INSN_RE = re.compile(r'^\s+\S+\s+(0x[0-9a-f]+)\s+[0-9a-f]+\s+(.+?)\s*$')
 _GO_TEXT_RE = re.compile(r'^TEXT\s+(.+?)\(SB\)')
 
-# A GAS label: token followed by ':' at the start of a line.
-_GAS_LABEL_RE = re.compile(r'^([^\s:#]+):\s*(?:#.*)?$')
+# A GAS label: token followed by ':' at the start of a line, optionally
+# followed by a trailing comment ('#', '//', or ';').
+_GAS_LABEL_RE = re.compile(r'^([^\s:#]+):\s*(?:(?:#|//|;).*)?$')
 
 # ANSI SGR escape sequences (Julia's `code_native` colourises its output by
 # default; stripping these lets us parse such files unchanged).
@@ -176,6 +177,11 @@ def _parse_go_items(fun_lines):
     return items
 
 
+_TRAIL_SLASH_COMMENT = re.compile(r'\s*//.*$')
+_TRAIL_HASH_COMMENT = re.compile(r'\s+#(?:\s.*)?$')
+_TRAIL_SEMI_COMMENT = re.compile(r'\s+;.*$')
+
+
 def _parse_gas_items(fun_lines):
     """Parse GAS-style function lines.  Skip directives, keep labels & insns."""
     items = []
@@ -184,7 +190,9 @@ def _parse_gas_items(fun_lines):
         if not s.strip():
             continue
         stripped = s.lstrip()
-        if stripped.startswith('#') or stripped.startswith(';'):
+        # Full-line comments: '#' / ';' / '//' at column 0.
+        if (stripped.startswith('#') or stripped.startswith(';')
+                or stripped.startswith('//')):
             continue
         m = _GAS_LABEL_RE.match(s)
         if m:
@@ -192,11 +200,14 @@ def _parse_gas_items(fun_lines):
             continue
         if stripped.startswith('.'):
             continue  # directive
-        text = stripped
-        # Strip trailing "# ..." or "; ..." comments
-        for sep in ('#', ';'):
-            if sep in text:
-                text = text.split(sep, 1)[0].rstrip()
+        # Strip trailing comments.  AArch64 uses '#' to introduce immediates
+        # (e.g. "[sp, #-16]", "add x0, x8, #123"), so we only treat '#' as a
+        # comment marker when preceded by whitespace AND followed by either
+        # whitespace or end-of-line — never when glued to its operand.
+        text = _TRAIL_SLASH_COMMENT.sub('', stripped)
+        text = _TRAIL_HASH_COMMENT.sub('', text)
+        text = _TRAIL_SEMI_COMMENT.sub('', text)
+        text = text.rstrip()
         if text:
             items.append(('insn', None, text))
     return items

@@ -6,6 +6,14 @@ produced by the Go, Julia, OCaml, or Rust compiler.
 Given the function name as it appears in the source code, `vis_asm` writes a
 DOT file and renders an SVG of the CFG.
 
+## Install (venv recommended)
+
+```
+python3 -m venv venv
+. venv/bin/activate
+pip install --upgrade git+ssh://git@github.com/taura/vis_asm
+```
+
 ## Example
 
 CFG of the `gcd1` function as compiled by `rustc`:
