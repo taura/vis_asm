@@ -24,20 +24,40 @@ from pathlib import Path
 # Regexes shared across formats
 # ---------------------------------------------------------------------------
 
-# A jump mnemonic followed by its target.  Any mnemonic starting with "j"
+# x86 jump mnemonic followed by its target.  Any mnemonic starting with "j"
 # (e.g. j, jmp, jmpq, je, jne, jae, jbe, jg, jge, jl, jle, jp, jnp, ...)
-_JUMP_RE = re.compile(r'^\s*(j\w+)\s+(.+?)\s*$', re.IGNORECASE)
+_X86_JUMP_RE = re.compile(r'^\s*(j[a-z]+)\s+(.+?)\s*$', re.IGNORECASE)
 
-# Return mnemonic
-_RET_RE = re.compile(r'^\s*(retq|ret)\b', re.IGNORECASE)
+# AArch64 conditional branch: b.<cond> <target>   (e.g. b.eq, b.ne, b.ls, ...)
+_ARM_BCOND_RE = re.compile(r'^\s*(b\.[a-z]+)\s+(.+?)\s*$', re.IGNORECASE)
+
+# AArch64 unconditional branch: b <target>  (must not match bl, br, bic, ...)
+_ARM_B_RE = re.compile(r'^\s*b\s+(.+?)\s*$', re.IGNORECASE)
+
+# AArch64 compare-and-branch: cbz/cbnz <reg>, <target>
+_ARM_CBZ_RE = re.compile(
+    r'^\s*(cbn?z)\s+\S+\s*,\s*(.+?)\s*$', re.IGNORECASE)
+
+# AArch64 test-bit-and-branch: tbz/tbnz <reg>, #<imm>, <target>
+_ARM_TBZ_RE = re.compile(
+    r'^\s*(tbn?z)\s+\S+\s*,\s*\S+\s*,\s*(.+?)\s*$', re.IGNORECASE)
+
+# AArch64 indirect branch: br/braa/brab/braaz/brabz <reg> — ends a block but
+# has no statically resolvable target.
+_ARM_BR_RE = re.compile(r'^\s*(br|braa|brab|braaz|brabz)\s+\S+', re.IGNORECASE)
+
+# Return mnemonic: x86 retq/ret, AArch64 ret (optionally with link register).
+_RET_RE = re.compile(r'^\s*(retq|ret|eret)\b', re.IGNORECASE)
 
 # Go's objdump line: "  src:line<TAB>0xaddr<TAB>bytes<TAB>INSTR<TAB>// gnu"
 _GO_INSN_RE = re.compile(r'^\s+\S+\s+(0x[0-9a-f]+)\s+[0-9a-f]+\s+(.+?)\s*$')
 _GO_TEXT_RE = re.compile(r'^TEXT\s+(.+?)\(SB\)')
 
-# A GAS label: token followed by ':' at the start of a line, optionally
-# followed by a trailing comment ('#', '//', or ';').
-_GAS_LABEL_RE = re.compile(r'^([^\s:#]+):\s*(?:(?:#|//|;).*)?$')
+# A GAS label at column 0, possibly followed by more content on the same
+# line (an instruction or trailing comment).  OCaml's amd64/arm backends
+# emit ``LABEL:<TAB>INSN`` for out-of-line code, so we capture both the
+# label and the rest of the line.
+_GAS_LABEL_RE = re.compile(r'^([A-Za-z_.$][\w.$]*):(.*)$')
 
 # ANSI SGR escape sequences (Julia's `code_native` colourises its output by
 # default; stripping these lets us parse such files unchanged).
@@ -129,6 +149,24 @@ def _find_gas_function(lines, fun_name, fmt):
 # Parsing into a stream of ('label', name) / ('insn', addr, text) items
 # ---------------------------------------------------------------------------
 
+_ARM_PC_REL_RE = re.compile(r'\.\+0x[0-9a-fA-F]+')
+
+
+def _resolve_arm_pc_rel(text, addr_hex):
+    """In a Go ARM ``//`` instruction, replace ``.+0xHEX`` with the absolute
+    target address (as ``0xHEX``).  ``0xHEX`` is a signed 64-bit offset.
+    """
+    base = int(addr_hex, 16)
+
+    def repl(m):
+        off = int(m.group(0)[2:], 16)
+        if off >= 0x8000000000000000:
+            off -= 0x10000000000000000
+        return '0x{:x}'.format(base + off)
+
+    return _ARM_PC_REL_RE.sub(repl, text)
+
+
 def _parse_go_items(fun_lines):
     """Parse Go function lines.
 
@@ -144,15 +182,19 @@ def _parse_go_items(fun_lines):
         if not m:
             continue
         addr, rest = m.group(1), m.group(2)
-        # Use the native (GNU/AT&T) instruction after "//", which objdump
-        # emits as a translation of Go's Plan 9 form.  Falling back to the
-        # Plan 9 form if no "//" is present.  Also resolves tail-call jumps
-        # to their target addresses (Plan 9 names them symbolically).
+        # Use the native (GNU/AT&T or AArch64) instruction after "//", which
+        # objdump emits as a translation of Go's Plan 9 form.  Falling back
+        # to the Plan 9 form if no "//" is present.  Also resolves tail-call
+        # jumps to their target addresses (Plan 9 names them symbolically).
         if '//' in rest:
             text = rest.split('//', 1)[1]
         else:
             text = rest
         text = reloc_tail.sub('', text).strip()
+        # On ARM Go objdump, branch targets are written PC-relative as
+        # ``.+0xHEX``; rewrite them to absolute hex so downstream code
+        # treats them like x86 absolute targets.
+        text = _resolve_arm_pc_rel(text, addr)
         insns.append((addr, text))
 
     if not insns:
@@ -161,10 +203,10 @@ def _parse_go_items(fun_lines):
     func_addrs = {a for a, _ in insns}
     targets = set()
     for _, text in insns:
-        jm = _JUMP_RE.match(text)
-        if not jm:
+        jinfo = _get_jump(text)
+        if jinfo is None:
             continue
-        tok = jm.group(2).split()[0].rstrip(',')
+        tok = jinfo[1]
         if tok.startswith('0x') and tok in func_addrs:
             targets.add(tok)
     targets.add(insns[0][0])  # function entry is always a leader
@@ -194,10 +236,19 @@ def _parse_gas_items(fun_lines):
         if (stripped.startswith('#') or stripped.startswith(';')
                 or stripped.startswith('//')):
             continue
+        # A leading label at column 0 may be followed on the same line by
+        # an instruction (OCaml does this for out-of-line code).  Emit the
+        # label, then fall through to parse the rest of the line.
         m = _GAS_LABEL_RE.match(s)
         if m:
             items.append(('label', m.group(1)))
-            continue
+            s = m.group(2)
+            stripped = s.lstrip()
+            if not stripped:
+                continue
+            if (stripped.startswith('#') or stripped.startswith(';')
+                    or stripped.startswith('//')):
+                continue
         if stripped.startswith('.'):
             continue  # directive
         # Strip trailing comments.  AArch64 uses '#' to introduce immediates
@@ -222,7 +273,11 @@ def _ends_block(instr):
     any jump (conditional or unconditional) or a return."""
     if instr is None:
         return False
-    return bool(_JUMP_RE.match(instr) or _RET_RE.match(instr))
+    if _RET_RE.match(instr):
+        return True
+    if _ARM_BR_RE.match(instr):
+        return True
+    return _get_jump(instr) is not None
 
 
 def _build_blocks(items):
@@ -286,19 +341,37 @@ def _is_return(instr):
 
 
 def _get_jump(instr):
-    """Return (is_conditional, target) if ``instr`` is a jump."""
+    """Return (is_conditional, target) if ``instr`` is a direct branch.
+
+    Recognises x86 jumps (jmp/jcc) as well as AArch64 ``b``, ``b.<cond>``,
+    ``cbz``/``cbnz`` and ``tbz``/``tbnz``.  Returns ``None`` for calls
+    (``call``/``bl``), indirect branches (``br``) and non-branches.
+    """
     if instr is None:
         return None
-    m = _JUMP_RE.match(instr)
-    if not m:
-        return None
-    mnemonic = m.group(1).lower()
-    target = m.group(2).split(None, 1)[0].rstrip(',')
-    is_uncond = mnemonic in ('jmp', 'jmpq')
-    is_cond = mnemonic.startswith('j') and not is_uncond
-    if not (is_cond or is_uncond):
-        return None
-    return (is_cond, target)
+    m = _X86_JUMP_RE.match(instr)
+    if m:
+        mnemonic = m.group(1).lower()
+        target = m.group(2).split(None, 1)[0].rstrip(',')
+        is_uncond = mnemonic in ('jmp', 'jmpq')
+        return (not is_uncond, target)
+    m = _ARM_BCOND_RE.match(instr)
+    if m:
+        target = m.group(2).split(None, 1)[0].rstrip(',')
+        return (True, target)
+    m = _ARM_CBZ_RE.match(instr)
+    if m:
+        target = m.group(2).split(None, 1)[0].rstrip(',')
+        return (True, target)
+    m = _ARM_TBZ_RE.match(instr)
+    if m:
+        target = m.group(2).split(None, 1)[0].rstrip(',')
+        return (True, target)
+    m = _ARM_B_RE.match(instr)
+    if m:
+        target = m.group(1).split(None, 1)[0].rstrip(',')
+        return (False, target)
+    return None
 
 
 def _build_edges(blocks):
@@ -313,6 +386,8 @@ def _build_edges(blocks):
         last = b['last_insn']
         if _is_return(last):
             continue
+        if last is not None and _ARM_BR_RE.match(last):
+            continue  # indirect branch: no statically resolvable target
         jinfo = _get_jump(last)
         if jinfo is None:
             if i + 1 < len(blocks):
