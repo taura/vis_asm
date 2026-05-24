@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vis-asm"
+version = "0.1.0"
+description = "Visualize the control-flow graph of a function in assembly produced by Go, Julia, OCaml, or Rust compilers."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Kenjiro Taura", email = "tau@g.ecc.u-tokyo.ac.jp" },
+]
+keywords = ["assembly", "cfg", "visualization", "compiler", "disassembler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Disassemblers",
+]
+
+[project.optional-dependencies]
+notebook = ["ipython"]
+
+[project.scripts]
+vis-asm = "vis_asm.vis_asm:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vis_asm"]
