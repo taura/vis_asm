@@ -31,6 +31,12 @@ _X86_JUMP_RE = re.compile(r'^\s*(j[a-z]+)\s+(.+?)\s*$', re.IGNORECASE)
 # AArch64 conditional branch: b.<cond> <target>   (e.g. b.eq, b.ne, b.ls, ...)
 _ARM_BCOND_RE = re.compile(r'^\s*(b\.[a-z]+)\s+(.+?)\s*$', re.IGNORECASE)
 
+# The same without the dot (b<cond>, e.g. bne, ble), the legacy spelling
+# GCC emits.  The condition list is explicit so bl, br, bic, ... never match.
+_ARM_BCOND_NODOT_RE = re.compile(
+    r'^\s*(b(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al|nv))'
+    r'\s+(.+?)\s*$', re.IGNORECASE)
+
 # AArch64 unconditional branch: b <target>  (must not match bl, br, bic, ...)
 _ARM_B_RE = re.compile(r'^\s*b\s+(.+?)\s*$', re.IGNORECASE)
 
@@ -329,6 +335,10 @@ def _build_blocks(items):
                     )
             current['instrs'].append(text)
             current['last_insn'] = text
+    # Drop trailing labels with no instructions (e.g. GCC's ``.LFE0:``
+    # end-of-function marker), which would otherwise show up as empty boxes.
+    while blocks and not blocks[-1]['instrs']:
+        blocks.pop()
     return blocks
 
 
@@ -355,7 +365,7 @@ def _get_jump(instr):
         target = m.group(2).split(None, 1)[0].rstrip(',')
         is_uncond = mnemonic in ('jmp', 'jmpq')
         return (not is_uncond, target)
-    m = _ARM_BCOND_RE.match(instr)
+    m = _ARM_BCOND_RE.match(instr) or _ARM_BCOND_NODOT_RE.match(instr)
     if m:
         target = m.group(2).split(None, 1)[0].rstrip(',')
         return (True, target)
