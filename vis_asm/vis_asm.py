@@ -444,6 +444,12 @@ def _emit_block(b, prefix=''):
 def _emit_edge(src, dst, lab, prefix=''):
     s = _safe_id(prefix + src)
     d = _safe_id(prefix + dst)
+    if src == dst:
+        # Self loop (a single-block loop).  By default dot draws it as a
+        # tiny arc beside the box; leave from the bottom-right corner and
+        # re-enter at the top-right corner so it reads as "go back up".
+        s += ':se'
+        d += ':ne'
     if lab:
         return '{} -> {} [label={}];'.format(s, d, _safe_id(lab))
     return '{} -> {};'.format(s, d)
