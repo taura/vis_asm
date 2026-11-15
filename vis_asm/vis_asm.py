@@ -3,7 +3,8 @@ vis_asm: Visualize the control-flow graph (CFG) of a function in an
 assembly file.
 
 Given an assembly file produced by Go (``go tool objdump -gnu``), Julia,
-OCaml (``ocamlopt -S``), or Rust (``rustc --emit asm``), and the function
+OCaml (``ocamlopt -S``), Rust (``rustc --emit asm``), C/C++ (``-S``), or
+NVIDIA PTX (e.g. ``clang --offload-device-only -S``), and the function
 name as it appears in the source code, ``vis_asm`` writes a DOT file and
 renders an SVG showing the CFG of that function.
 
@@ -52,8 +53,16 @@ _ARM_TBZ_RE = re.compile(
 # has no statically resolvable target.
 _ARM_BR_RE = re.compile(r'^\s*(br|braa|brab|braaz|brabz)\s+\S+', re.IGNORECASE)
 
-# Return mnemonic: x86 retq/ret, AArch64 ret (optionally with link register).
-_RET_RE = re.compile(r'^\s*(retq|ret|eret)\b', re.IGNORECASE)
+# Return mnemonic: x86 retq/ret, AArch64 ret (optionally with link register),
+# NVIDIA PTX ret/exit (unpredicated only; ``@%p ret`` does not end a path).
+_RET_RE = re.compile(r'^\s*(retq|ret|eret|exit)\b', re.IGNORECASE)
+
+# NVIDIA PTX branch: [@[!]%p] bra[.uni] <target>
+_PTX_BRA_RE = re.compile(r'^\s*(@!?%\w+\s+)?bra(?:\.uni)?\s+([^\s;]+)\s*;?\s*$')
+
+# NVIDIA PTX function header: [.visible|.weak] (.func|.entry) [(retval)] name
+_PTX_FUNC_RE = re.compile(
+    r'^(?:\.(?:visible|weak)\s+)?\.(?:func|entry)\s+(?:\([^)]*\)\s*)?([\w$]+)')
 
 # Go's objdump line: "  src:line<TAB>0xaddr<TAB>bytes<TAB>INSTR<TAB>// gnu"
 _GO_INSN_RE = re.compile(r'^\s+\S+\s+(0x[0-9a-f]+)\s+[0-9a-f]+\s+(.+?)\s*$')
@@ -87,6 +96,8 @@ def _detect_format(lines):
             return 'ocaml'
         if re.match(r'^julia_\w+_\d+:', line):
             return 'julia'
+        if re.match(r'^\.target\s+sm_', line):
+            return 'ptx'
     return 'gas'  # rust / generic GAS
 
 
@@ -118,6 +129,23 @@ def _find_go_function(lines, fun_name):
                     end = j
                     break
             return i, end, full
+    return None, None, None
+
+
+def _find_ptx_function(lines, fun_name):
+    """Return (start, end, label) for a PTX function: the lines between
+    the ``{`` after its header and the matching ``}`` at column 0."""
+    for i, line in enumerate(lines):
+        m = _PTX_FUNC_RE.match(line)
+        if not m or m.group(1) != fun_name:
+            continue
+        start = i
+        while start < len(lines) and lines[start] != '{':
+            start += 1
+        end = start + 1
+        while end < len(lines) and lines[end] != '}':
+            end += 1
+        return start + 1, end, fun_name
     return None, None, None
 
 
@@ -242,6 +270,9 @@ def _parse_gas_items(fun_lines):
         if (stripped.startswith('#') or stripped.startswith(';')
                 or stripped.startswith('//')):
             continue
+        # PTX call sequences are wrapped in ``{ // callseq`` ... ``}``.
+        if stripped.startswith('{') or stripped.startswith('}'):
+            continue
         # A leading label at column 0 may be followed on the same line by
         # an instruction (OCaml does this for out-of-line code).  Emit the
         # label, then fall through to parse the rest of the line.
@@ -264,7 +295,7 @@ def _parse_gas_items(fun_lines):
         text = _TRAIL_SLASH_COMMENT.sub('', stripped)
         text = _TRAIL_HASH_COMMENT.sub('', text)
         text = _TRAIL_SEMI_COMMENT.sub('', text)
-        text = text.rstrip()
+        text = text.rstrip().rstrip(';').rstrip()  # PTX ends insns with ';'
         if text:
             items.append(('insn', None, text))
     return items
@@ -359,6 +390,9 @@ def _get_jump(instr):
     """
     if instr is None:
         return None
+    m = _PTX_BRA_RE.match(instr)
+    if m:
+        return (m.group(1) is not None, m.group(2))
     m = _X86_JUMP_RE.match(instr)
     if m:
         mnemonic = m.group(1).lower()
@@ -566,6 +600,12 @@ def _list_functions(lines, fmt):
             if m and m.group(1) not in seen:
                 seen.add(m.group(1))
                 names.append(m.group(1))
+    elif fmt == 'ptx':
+        for line in lines:
+            m = _PTX_FUNC_RE.match(line)
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                names.append(m.group(1))
     else:
         # GAS / Rust: trust ``.type <name>, @function`` directives.
         type_pat = re.compile(
@@ -592,6 +632,8 @@ def _analyze(lines, fmt, fun_name, src=None):
     """Locate ``fun_name`` in ``lines`` and return (blocks, edges, label)."""
     if fmt == 'go':
         start, end, label = _find_go_function(lines, fun_name)
+    elif fmt == 'ptx':
+        start, end, label = _find_ptx_function(lines, fun_name)
     else:
         start, end, label = _find_gas_function(lines, fun_name, fmt)
     if start is None:
@@ -675,7 +717,7 @@ def main(argv=None):
     parser.add_argument(
         'asm_file',
         help='assembly file (Go `objdump -gnu`, OCaml `-S`, Julia, '
-             'or Rust `--emit asm`)',
+             'Rust `--emit asm`, C/C++ `-S`, or NVIDIA PTX)',
     )
     parser.add_argument(
         'function', nargs='?', default=None,

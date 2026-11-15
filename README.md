@@ -1,7 +1,8 @@
 # vis_asm
 
 Visualize the control-flow graph (CFG) of a function in an assembly file
-produced by the Go, Julia, OCaml, or Rust compiler.
+produced by the Go, Julia, OCaml, Rust, or C/C++ compiler (x86-64 or
+AArch64), or of a GPU function in NVIDIA PTX.
 
 Given the function name as it appears in the source code, `vis_asm` writes a
 DOT file and renders an SVG of the CFG.
@@ -72,6 +73,8 @@ In Jupyter the returned `IPython.display.SVG` renders inline.
 | Julia    | `code_native(io, f, types)`              |
 | OCaml    | `ocamlopt -S source.ml`                  |
 | Rust     | `rustc --emit asm source.rs`             |
+| C/C++    | `clang -S source.c` / `gcc -S source.c`  |
+| PTX      | `clang -fopenmp --offload-arch=sm_90 --offload-device-only -S source.c` |
 
 ## License
 
